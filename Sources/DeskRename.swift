@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Combine
 import SwiftUI
 
@@ -138,6 +139,7 @@ private struct NameEditor: View {
 }
 
 final class DeskRenameApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private static let diagnosticsKey = "MissionControlDiagnostics"
     private let model = DesktopNames()
     private let overlay = MissionControlOverlay()
     private var timer: Timer?
@@ -146,6 +148,7 @@ final class DeskRenameApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var missionControlOpen = false
     private var lastRefresh = Date.distantPast
     func applicationDidFinishLaunching(_ notification: Notification) {
+        overlay.diagnosticsEnabled = UserDefaults.standard.bool(forKey: Self.diagnosticsKey)
         installKeyboardMenus()
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status.button?.image = NSImage(systemSymbolName: "rectangle.on.rectangle", accessibilityDescription: "DeskRename")
@@ -155,7 +158,7 @@ final class DeskRenameApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         status.menu = menu
         updateStatus()
-        schedule(0.2)
+        schedule(0.1)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(spaceChanged),
             name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         showEditor()
@@ -172,14 +175,21 @@ final class DeskRenameApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         addItem("Rename Desktops…", action: #selector(showEditor), key: "r", to: menu)
         addItem("Open Mission Control", action: #selector(openMissionControl), key: "", to: menu)
+        let diagnostics = addItem("Diagnostic Overlay", action: #selector(toggleDiagnostics), key: "", to: menu)
+        diagnostics.state = overlay.diagnosticsEnabled ? .on : .off
+        if !AXIsProcessTrusted() {
+            addItem("Allow Reading Dock Preview Positions…", action: #selector(enableDockPositions), key: "", to: menu)
+        }
         menu.addItem(.separator())
         addItem("Quit DeskRename", action: #selector(quit), key: "q", to: menu)
     }
 
-    private func addItem(_ title: String, action: Selector, key: String, to menu: NSMenu) {
+    @discardableResult
+    private func addItem(_ title: String, action: Selector, key: String, to menu: NSMenu) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
         menu.addItem(item)
+        return item
     }
 
     private func installKeyboardMenus() {
@@ -240,6 +250,17 @@ final class DeskRenameApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func quit() { NSApp.terminate(nil) }
 
+    @objc private func toggleDiagnostics() {
+        overlay.diagnosticsEnabled.toggle()
+        UserDefaults.standard.set(overlay.diagnosticsEnabled, forKey: Self.diagnosticsKey)
+        tick()
+    }
+
+    @objc private func enableDockPositions() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
+    }
+
     @objc private func spaceChanged() {
         model.refresh()
         updateStatus()
@@ -266,7 +287,7 @@ final class DeskRenameApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             missionControlOpen = open
             model.refresh()
             updateStatus()
-            schedule(open ? 0.04 : 0.20)
+            schedule(open ? 0.04 : 0.10)
         }
     }
 

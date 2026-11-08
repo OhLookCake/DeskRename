@@ -74,8 +74,13 @@ final class SpaceReader {
                 guard (slot["type"] as? Int) == 0 else {
                     let layout = slot["TileLayoutManager"] as? [String: Any]
                     let tiles = layout?["TileSpaces"] as? [[String: Any]] ?? []
-                    let apps = tiles.compactMap { $0["appName"] as? String }
-                    let title = apps.isEmpty ? (slot["name"] as? String ?? "Full Screen") : apps.joined(separator: " & ")
+                    // Some Space snapshots omit appName even when the app is still running.
+                    let apps = tiles.compactMap { tile in
+                        (tile["appName"] as? String) ?? Self.runningAppName(in: tile)
+                    }
+                    let title = apps.isEmpty
+                        ? (slot["name"] as? String ?? Self.runningAppName(in: slot) ?? "Full Screen")
+                        : apps.joined(separator: " & ")
                     return .init(desktop: nil, nativeTitle: title)
                 }
                 number += 1
@@ -91,5 +96,10 @@ final class SpaceReader {
             }
             return DisplaySpaces(identifier: identifier, slots: previews)
         }
+    }
+
+    private static func runningAppName(in space: [String: Any]) -> String? {
+        guard let pid = space["pid"] as? Int32, pid > 0 else { return nil }
+        return NSRunningApplication(processIdentifier: pid)?.localizedName
     }
 }

@@ -38,17 +38,20 @@ final class MissionControlOverlay {
         let strip: StripView
     }
 
+    private struct Expansion {
+        let beganAt: CFTimeInterval
+        var offset: CGFloat
+    }
+
     private var overlays: [String: Overlay] = [:]
-    private var expanded = Set<String>()
+    private var expansions: [String: Expansion] = [:]
     private var dockPID: pid_t?
     private var dockCheck: CFTimeInterval = 0
-    private var hoverStart: [String: CFTimeInterval] = [:]
 
     func clear() {
         overlays.values.forEach { $0.window.orderOut(nil) }
         overlays.removeAll()
-        expanded.removeAll()
-        hoverStart.removeAll()
+        expansions.removeAll()
     }
 
     func update(displays: [DisplaySpaces], names: [String: String]) -> Bool {
@@ -60,29 +63,34 @@ final class MissionControlOverlay {
         let cursor = NSEvent.mouseLocation
         let now = CACurrentMediaTime()
         var shown = Set<String>()
+        var active = Set<String>()
         for screen in screens {
             guard let display = displays.first(where: { $0.matches(screen) })
                     ?? (NSScreen.screens.count == 1 && displays.count == 1 ? displays.first : nil) else { continue }
             let key = display.identifier
             let frame = screen.frame
+            guard let row = PreviewRow(size: frame.size, safeTop: screen.safeAreaInsets.top,
+                                       count: display.slots.count) else { continue }
+            active.insert(key)
 
-            // On Tahoe, hovering in the top strip expands the desktop thumbnails.
-            // Latch the first entry so moving down onto the thumbnails during
-            // the animation doesn't cancel it. Include the very top screen edge.
-            if !expanded.contains(key) {
-                if let start = hoverStart[key] {
-                    if now - start >= 0.22 { expanded.insert(key) }
-                } else {
-                    let depth = frame.maxY - cursor.y
-                    if cursor.x >= frame.minX && cursor.x < frame.maxX &&
-                        depth >= 0 && depth <= max(40, screen.safeAreaInsets.top + 18) {
-                        hoverStart[key] = now
-                    }
-                }
+            let x = cursor.x - frame.minX
+            let depth = frame.maxY - cursor.y
+            if expansions[key] == nil, x >= 0, x < frame.width,
+               depth >= 0, depth <= max(40, screen.safeAreaInsets.top + 18) {
+                // The Dock puts the preview for the compact title under the
+                // pointer. Latch that offset when the strip begins expanding.
+                expansions[key] = Expansion(beganAt: now, offset: row.offset(at: x, slots: display.slots))
             }
-            guard expanded.contains(key) else { continue }
+            guard var expansion = expansions[key] else { continue }
+            if x < 80 || x > frame.width - 80 || depth < 0 || depth > row.captionDepth + 14 {
+                // Once the pointer leaves the strip, the Dock centers the row
+                // again and keeps it centered until Mission Control closes.
+                expansion.offset = 0
+                expansions[key] = expansion
+            }
+            guard now - expansion.beganAt >= 0.22 else { continue }
 
-            let plates = Self.layout(display.slots, names: names, screen: screen)
+            let plates = Self.layout(display.slots, names: names, row: row, offset: expansion.offset)
             guard !plates.isEmpty else { continue }
             shown.insert(key)
             // Give the transparent window just enough area for the caption row.
@@ -97,6 +105,9 @@ final class MissionControlOverlay {
 
         for key in Array(overlays.keys) where !shown.contains(key) {
             overlays.removeValue(forKey: key)?.window.orderOut(nil)
+        }
+        for key in Array(expansions.keys) where !active.contains(key) {
+            expansions.removeValue(forKey: key)
         }
         return true
     }
@@ -147,28 +158,54 @@ final class MissionControlOverlay {
         }
     }
 
-    private static func layout(_ slots: [Desktop?], names: [String: String], screen: NSScreen) -> [Plate] {
-        guard !slots.isEmpty else { return [] }
-        let size = screen.frame.size
-        let bandHeight = bandHeight(for: size)
-        // The expanded strip is centered. Measure the spacing in points from
-        // the thumbnail height and display aspect ratio, rather than as a
-        // percentage of the screen width. Crowded rows shrink the thumbnails.
-        let aspect = size.width / size.height
-        let gap: CGFloat = 32
-        let step = min(90 * aspect + gap, size.width * 0.94 / CGFloat(slots.count))
-        guard step > gap + 2 else { return [] }
-        let thumbnailHeight = (step - gap) / aspect
-        let first = (size.width - step * CGFloat(slots.count - 1)) / 2
-        let thumbnailTop = max(27, screen.safeAreaInsets.top + 13)
-        let captionDepth = thumbnailTop + thumbnailHeight + 15
-        let midY = bandHeight - captionDepth
+    private struct PreviewRow {
+        private static let gap: CGFloat = 32
+        private let size: CGSize
+        private let first: CGFloat
+        let step: CGFloat
+        let captionDepth: CGFloat
+
+        init?(size: CGSize, safeTop: CGFloat, count: Int) {
+            guard count > 0 else { return nil }
+            let aspect = size.width / size.height
+            let step = min(90 * aspect + Self.gap, size.width * 0.94 / CGFloat(count))
+            guard step > Self.gap + 2 else { return nil }
+            self.size = size
+            self.step = step
+            first = (size.width - step * CGFloat(count - 1)) / 2
+            captionDepth = max(27, safeTop + 13) + (step - Self.gap) / aspect + 15
+        }
+
+        var labelY: CGFloat { MissionControlOverlay.bandHeight(for: size) - captionDepth }
+
+        func center(at index: Int) -> CGFloat { first + CGFloat(index) * step }
+
+        func offset(at x: CGFloat, slots: [DisplaySpaces.Slot]) -> CGFloat {
+            let font = NSFont.systemFont(ofSize: 12)
+            let widths = slots.map {
+                min(500, ceil(($0.nativeTitle as NSString).size(withAttributes: [.font: font]).width) + 20)
+            }
+            let compactWidth = widths.reduce(0, +) + Self.gap * CGFloat(widths.count - 1)
+            var left = (size.width - compactWidth) / 2
+            guard x >= left, x <= left + compactWidth else { return 0 }
+            for (index, width) in widths.enumerated() {
+                // If expansion starts in a gap, the Dock keeps the title on
+                // its left as the anchor.
+                if x < left + width + Self.gap { return x - center(at: index) }
+                left += width + Self.gap
+            }
+            return 0
+        }
+    }
+
+    private static func layout(_ slots: [DisplaySpaces.Slot], names: [String: String], row: PreviewRow,
+                               offset: CGFloat) -> [Plate] {
         return slots.enumerated().compactMap { index, item in
-            guard let item, let name = names[item.id] else { return nil }
+            guard let item = item.desktop, let name = names[item.id] else { return nil }
             let caption = (name as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13, weight: .medium)])
-            let width = min(max(76, ceil(caption.width) + 20), floor(step - 6))
-            return Plate(name: name, frame: CGRect(x: (first + CGFloat(index) * step - width / 2).rounded(),
-                        y: (midY - 12).rounded(), width: width, height: 24),
+            let width = min(max(76, ceil(caption.width) + 20), floor(row.step - 6))
+            return Plate(name: name, frame: CGRect(x: (row.center(at: index) + offset - width / 2).rounded(),
+                        y: (row.labelY - 12).rounded(), width: width, height: 24),
                         selected: item.isCurrent)
         }
     }

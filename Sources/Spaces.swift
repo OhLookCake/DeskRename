@@ -10,11 +10,16 @@ struct Desktop: Equatable, Identifiable {
 }
 
 struct DisplaySpaces: Equatable {
+    struct Slot: Equatable {
+        let desktop: Desktop?
+        let nativeTitle: String
+    }
+
     let identifier: String
     // Full-screen apps occupy a position in Mission Control but aren't desktops.
-    let slots: [Desktop?]
+    let slots: [Slot]
 
-    var desktops: [Desktop] { slots.compactMap { $0 } }
+    var desktops: [Desktop] { slots.compactMap(\.desktop) }
 
     func matches(_ screen: NSScreen) -> Bool {
         guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 else {
@@ -35,6 +40,8 @@ final class SpaceReader {
     private let library: UnsafeMutableRawPointer?
     private let connect: Connection?
     private let copyDisplays: CopyDisplays?
+    private let desktopTitleFormat = Bundle(path: "/System/Library/CoreServices/Dock.app")?
+        .localizedString(forKey: "DesktopNum", value: "Desktop %@", table: nil) ?? "Desktop %@"
 
     init() {
         let library = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY | RTLD_LOCAL)
@@ -63,17 +70,26 @@ final class SpaceReader {
                   !slots.isEmpty else { return nil }
             let current = (display["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? UInt64
             var number = 0
-            let desktops: [Desktop?] = slots.map { slot in
-                guard (slot["type"] as? Int) == 0 else { return nil }
+            let previews: [DisplaySpaces.Slot] = slots.map { slot in
+                guard (slot["type"] as? Int) == 0 else {
+                    let layout = slot["TileLayoutManager"] as? [String: Any]
+                    let tiles = layout?["TileSpaces"] as? [[String: Any]] ?? []
+                    let apps = tiles.compactMap { $0["appName"] as? String }
+                    let title = apps.isEmpty ? (slot["name"] as? String ?? "Full Screen") : apps.joined(separator: " & ")
+                    return .init(desktop: nil, nativeTitle: title)
+                }
                 number += 1
-                guard let managedID = slot["ManagedSpaceID"] as? UInt64 else { return nil }
+                let title = String(format: desktopTitleFormat, String(number))
+                let unnamed = DisplaySpaces.Slot(desktop: nil, nativeTitle: title)
+                guard let managedID = slot["ManagedSpaceID"] as? UInt64 else { return unnamed }
                 // The original system desktop can have an empty UUID on some releases.
                 let uuid = (slot["uuid"] as? String ?? "").lowercased()
                 let id = uuid.isEmpty && managedID == 1 ? "original-desktop" : uuid
-                guard !id.isEmpty, seen.insert(id).inserted else { return nil }
-                return Desktop(id: id, number: number, isCurrent: current == managedID)
+                guard !id.isEmpty, seen.insert(id).inserted else { return unnamed }
+                let desktop = Desktop(id: id, number: number, isCurrent: current == managedID)
+                return .init(desktop: desktop, nativeTitle: title)
             }
-            return DisplaySpaces(identifier: identifier, slots: desktops)
+            return DisplaySpaces(identifier: identifier, slots: previews)
         }
     }
 }

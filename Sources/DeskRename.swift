@@ -155,7 +155,7 @@ final class DeskRenameApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         status.menu = menu
         updateStatus()
-        schedule(0.4)
+        schedule(0.2)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(spaceChanged),
             name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         showEditor()
@@ -266,7 +266,7 @@ final class DeskRenameApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             missionControlOpen = open
             model.refresh()
             updateStatus()
-            schedule(open ? 0.10 : 0.40)
+            schedule(open ? 0.04 : 0.20)
         }
     }
 

@@ -143,6 +143,12 @@ final class MissionControlOverlay {
             return false
         }
 
+        // A stationary pointer is already in the strip when the Dock opens it.
+        // There is no hover entry to anchor a horizontal shift.
+        let pointerParkedAtOpen = trackedDisplays.isEmpty &&
+            previousPointer?.polled == true &&
+            previousPointer?.point == cursor.point
+
         trackedDisplays.removeAll(keepingCapacity: true)
         for screen in screens {
             guard let display = displays.first(where: { $0.matches(screen) })
@@ -151,7 +157,7 @@ final class MissionControlOverlay {
                                        count: display.slots.count) else { continue }
             trackedDisplays[display.identifier] = TrackedDisplay(screen: screen, row: row, slots: display.slots)
         }
-        if !pendingPointer.isEmpty {
+        if !pointerParkedAtOpen, !pendingPointer.isEmpty {
             previousPointer = nil
             for sample in pendingPointer.sorted(by: { $0.time < $1.time })
                 where now - sample.time <= Self.pointerLookback {
@@ -162,6 +168,11 @@ final class MissionControlOverlay {
         lastApproachTime = -.infinity
         // Also sample the system pointer for events the Dock consumes directly.
         trackPointer(cursor)
+        if pointerParkedAtOpen {
+            for (key, display) in trackedDisplays where Self.isInCompactStrip(cursor.point, screen: display.screen) {
+                expansions[key]?.offset = 0
+            }
+        }
         if let dockPID { nativePreviews.refresh(dockPID: dockPID) }
 
         var shown = Set<String>()
